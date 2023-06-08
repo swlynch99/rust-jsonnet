@@ -42,15 +42,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     ];
 
     let mut c = cc::Build::new();
-    c.cpp(true)
-        .flag_if_supported("-std=c++0x")
-        .include(out_dir.join("include"))
-        .include(dir.join("include"))
-        .include(dir.join("third_party/md5"))
-        .include(dir.join("third_party/json"));
+    c.cpp(true);
+    c.flag_if_supported("-std=c++17");
+    c.include(out_dir.join("include"));
+    c.include(dir.join("include"));
+    c.include(dir.join("third_party/md5"));
+    c.include(dir.join("third_party/json"));
+    c.include(dir.join("third_party/rapidyaml/rapidyaml/src/"));
+    c.include(dir.join("third_party/rapidyaml/rapidyaml/ext/c4core/src/"));
 
     for f in &jsonnet_core {
         c.file(dir.join("core").join(f));
+    }
+
+    for f in glob::glob("jsonnet/third_party/rapidyaml/rapidyaml/src/c4/yml/*.cpp")? {
+        c.file(f?);
+    }
+
+    for f in glob::glob("jsonnet/third_party/rapidyaml/rapidyaml/ext/c4core/src/c4/*.cpp")? {
+        c.file(f?);
     }
 
     c.file(dir.join("third_party/md5/md5.cpp"));

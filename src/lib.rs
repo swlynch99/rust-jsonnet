@@ -252,37 +252,49 @@ fn osstr2cstring<T: AsRef<OsStr>>(os: T) -> CString {
 // `jsonnet_sys::JsonnetImportCallback`-compatible function that
 // interprets `ctx` as an `ImportContext` and converts arguments
 // appropriately.
-extern "C" fn import_callback<F>(
+unsafe extern "C" fn import_callback<F>(
     ctx: *mut c_void,
-    base: &c_char,
-    rel: &c_char,
-    found_here: &mut *mut c_char,
-    success: &mut c_int,
-) -> *mut c_char
+    base: *const c_char,
+    rel: *const c_char,
+    found_here: *mut *mut c_char,
+    buf: *mut *mut c_char,
+    buflen: *mut usize,
+) -> c_int
 where
     F: Fn(&JsonnetVm, &Path, &Path) -> Result<(PathBuf, String), String>,
 {
-    let ctx = unsafe { &*(ctx as *mut ImportContext<F>) };
-    let vm = ctx.vm;
-    let callback = &ctx.cb;
-    let base_path = Path::new(cstr2osstr(unsafe { CStr::from_ptr(base) }));
-    let rel_path = Path::new(cstr2osstr(unsafe { CStr::from_ptr(rel) }));
-    match callback(vm, base_path, rel_path) {
+    let base = CStr::from_ptr(base);
+    let rel = CStr::from_ptr(rel);
+
+    let ImportContext { vm, ref cb } = *(ctx as *mut ImportContext<F>);
+    let base = Path::new(cstr2osstr(base));
+    let rel = Path::new(cstr2osstr(rel));
+
+    match cb(vm, base, rel) {
         Ok((found_here_path, contents)) => {
-            *success = 1;
+            let bytes = osstr2bytes(found_here_path.as_os_str());
+            let location = JsonnetString::from_bytes(vm, bytes);
 
-            let v = {
-                // Note: PathBuf may not be valid utf8.
-                let b = osstr2bytes(found_here_path.as_os_str());
-                JsonnetString::from_bytes(vm, b)
-            };
-            *found_here = v.into_raw();
+            let ptr = jsonnet_sys::jsonnet_realloc(vm.0, std::ptr::null_mut(), contents.len());
+            assert!(!ptr.is_null() || contents.len() == 0);
+            std::ptr::copy_nonoverlapping(contents.as_ptr() as _, ptr, contents.len());
 
-            JsonnetString::new(vm, &contents).into_raw()
+            *buf = ptr;
+            *buflen = contents.len();
+            *found_here = location.into_raw();
+
+            0
         }
         Err(err) => {
-            *success = 0;
-            JsonnetString::new(vm, &err).into_raw()
+            // The error message is not supposed to have a null terminator byte
+            // so we copy it to an allocation manually.
+            let ptr = jsonnet_sys::jsonnet_realloc(vm.0, std::ptr::null_mut(), err.len());
+            std::ptr::copy_nonoverlapping(err.as_ptr() as _, ptr, err.len());
+
+            *buf = ptr;
+            *buflen = err.len();
+
+            1
         }
     }
 }
@@ -301,29 +313,29 @@ struct NativeContext<'a, F> {
 // `jsonnet_sys::JsonnetNativeCallback`-compatible function that
 // interprets `ctx` as a `NativeContext` and converts arguments
 // appropriately.
-extern "C" fn native_callback<'a, F>(
-    ctx: *mut libc::c_void,
+unsafe extern "C" fn native_callback<'a, F>(
+    ctx: *mut c_void,
     argv: *const *const JsonnetJsonValue,
-    success: &mut c_int,
+    success: *mut c_int,
 ) -> *mut JsonnetJsonValue
 where
     F: Fn(&'a JsonnetVm, &[JsonVal<'a>]) -> Result<JsonValue<'a>, String>,
 {
-    let ctx = unsafe { &*(ctx as *mut NativeContext<F>) };
-    let vm = ctx.vm;
-    let callback = &ctx.cb;
-    let args: Vec<_> = (0..ctx.argc)
-        .map(|i| unsafe { JsonVal::from_ptr(vm, *argv.offset(i as isize)) })
+    let NativeContext { vm, argc, ref cb } = *(ctx as *mut NativeContext<F>);
+    let args: Vec<_> = std::slice::from_raw_parts(argv, argc)
+        .iter()
+        .copied()
+        .map(|value| JsonVal::from_ptr(vm, value))
         .collect();
-    match callback(vm, &args) {
+
+    match cb(vm, &args) {
         Ok(v) => {
             *success = 1;
             v.into_raw()
         }
         Err(err) => {
             *success = 0;
-            let ret = JsonValue::from_str(vm, &err);
-            ret.into_raw()
+            JsonValue::from_str(vm, &err).into_raw()
         }
     }
 }
@@ -402,7 +414,7 @@ impl JsonnetVm {
         unsafe {
             jsonnet_sys::jsonnet_import_callback(
                 self.as_ptr(),
-                import_callback::<F> as *const _,
+                Some(import_callback::<F>),
                 // TODO: ctx is leaked :(
                 Box::into_raw(Box::new(ctx)) as *mut _,
             );
@@ -477,7 +489,7 @@ impl JsonnetVm {
             jsonnet_sys::jsonnet_native_callback(
                 self.as_ptr(),
                 cname.as_ptr(),
-                native_callback::<F> as *const _,
+                Some(native_callback::<F>),
                 // TODO: ctx is leaked :(
                 Box::into_raw(Box::new(ctx)) as *mut _,
                 cptrs.as_slice().as_ptr(),
@@ -915,4 +927,29 @@ fn basic_eval_err() {
     println!("result is {:?}", result);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Unknown variable: bogus"));
+}
+
+#[test]
+fn basic_import_callback() {
+    use std::ffi::OsStr;
+
+    let mut vm = JsonnetVm::new();
+    vm.import_callback(|_vm, base, rel| {
+        if rel.file_stem() == Some(OsStr::new("bar")) {
+            let newbase = base.into();
+            let contents = "2 + 3".to_owned();
+            Ok((newbase, contents))
+        } else {
+            Err("not found".to_owned())
+        }
+    });
+
+    let output = vm
+        .evaluate_snippet("myimport", "import 'x/bar.jsonnet'")
+        .unwrap();
+    assert_eq!(output.to_string(), "5\n");
+    drop(output);
+
+    let result = vm.evaluate_snippet("myimport", "import 'x/foo.jsonnet'");
+    assert!(result.is_err());
 }

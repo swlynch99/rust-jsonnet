@@ -36,7 +36,7 @@ impl<'a> JsonnetString<'a> {
     /// `JsonnetString::new` over this function.
     pub fn from_bytes(vm: &'a JsonnetVm, v: &[u8]) -> Self {
         unsafe {
-            let p = jsonnet_sys::jsonnet_realloc(vm.as_ptr(), ptr::null(), v.len() + 1);
+            let p = jsonnet_sys::jsonnet_realloc(vm.as_ptr(), ptr::null_mut(), v.len() + 1);
             ptr::copy_nonoverlapping(v.as_ptr(), p as *mut u8, v.len());
             *(p.offset(v.len() as isize)) = 0; // trailing nul for C string
             Self::from_ptr(vm, p)

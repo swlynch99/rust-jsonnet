@@ -18,7 +18,11 @@ name = "jsonnet"
 
 [dependencies]
 libc = "0.2"
-jsonnet-sys = { path = "jsonnet-sys", version = "0.20.0" }
+# jsonnet-sys = { path = "jsonnet-sys", version = "0.20.0" }
+
+[dependencies.jsonnet-sys]
+package = "jsonnet-go-sys"
+git = "https://github.com/swlynch99/jsonnet-go-sys"
 
 [dev-dependencies]
 clap = "2.31"
